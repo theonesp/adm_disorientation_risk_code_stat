@@ -1,0 +1,201 @@
+---
+title: "DataSet Creation"
+output: html_notebook
+---
+
+# Environment
+
+```{r}
+library(bigrquery)
+library(summarytools)
+library(dplyr)
+library(plotly)
+library(readxl)
+
+asciify <- function(df, pad = 1, ...) {
+    ## error checking
+    stopifnot(is.data.frame(df))
+    ## internal functions
+    SepLine <- function(n, pad = 1) {
+        tmp <- lapply(n, function(x, pad) paste(rep("-", x + (2* pad)),
+                                                collapse = ""),
+                      pad = pad)
+        paste0("+", paste(tmp, collapse = "+"), "+")
+    }
+    Row <- function(x, n, pad = 1) {
+        foo <- function(i, x, n) {
+            fmt <- paste0("%", n[i], "s")
+            sprintf(fmt, as.character(x[i]))
+        }
+        rowc <- sapply(seq_along(x), foo, x = x, n = n)
+        paste0("|", paste(paste0(rep(" ", pad), rowc, rep(" ", pad)),
+                          collapse = "|"),
+               "|")
+    }
+    ## convert everything to characters
+    df <- as.matrix(df)
+    ## nchar in data
+    mdf <- apply(df, 2, function(x) max(nchar(x)))
+    ## nchar in names
+    cnames <- nchar(colnames(df))
+    ## max nchar of name+data per elements
+    M <- pmax(mdf, cnames)
+    ## write the header
+    sep <- SepLine(M, pad = pad)
+    writeLines(sep)
+    writeLines(Row(colnames(df), M, pad = pad))
+    writeLines(sep)
+    ## write the rows
+    for(i in seq_len(nrow(df))) {
+        ## write a row
+        writeLines(Row(df[i,], M, pad = pad))
+        ## write separator
+        writeLines(sep)
+    }
+    invisible(df)
+}
+
+```
+
+
+## BigQuery related functions Set up
+
+This chunks also creates the run_query and get_sql function.
+
+```{r setup, include=FALSE}
+
+project_id <- "hst-953-2018"
+options(httr_oauth_cache=FALSE)
+run_query <- function(query){
+  data <- query_exec(query, project=project_id, use_legacy_sql=FALSE,max_pages = Inf)
+  return(data)
+}
+
+# function for reading sql files
+getSQL <- function(filepath){
+  con = file(filepath, "r")
+  sql.string <- ""
+
+  while (TRUE){
+    line <- readLines(con, n = 1)
+
+    if ( length(line) == 0 ){
+      break
+    }
+
+    line <- gsub("\\t", " ", line)
+
+    if(grepl("--",line) == TRUE){
+      line <- paste(sub("--","/*",line),"*/")
+    }
+
+    sql.string <- paste(sql.string, line)
+  }
+
+  close(con)
+  return(sql.string)
+}
+```
+
+# Creating the datasets
+
+```{r}
+
+demographics<-run_query(getSQL('sql/demographics.sql'))
+
+gcs_baseline<-run_query(getSQL("sql/gcs_baseline.sql" ))
+
+apache_groups<-run_query(getSQL('sql/apache_groups.sql')) 
+
+apachescore<-run_query(getSQL('sql/apachescore.sql')) 
+
+uniquepatients_first_icustay<-run_query(getSQL("sql/uniquepatients_first_icustay.sql" ))
+
+code_status_adm_change<-run_query(getSQL("sql/code_status_adm_change.sql" ))
+
+```
+
+
+
+# Merge all datasets
+
+We are using a left join to join them
+
+```{r}
+# left join = all.x=TRUE
+adm_disorientation_risk_code_stat<-Reduce(function(...) merge(..., all.x=TRUE,by = "patientunitstayid"), list(
+  uniquepatients_first_icustay
+,demographics
+,apache_groups
+,apachescore
+,code_status_adm_change	              
+,gcs_baseline
+))
+
+adm_disorientation_risk_code_stat['gcs_after_discharge']<-if_else(
+  critical_illness_confusion_df$gcs_abnormality_offset > critical_illness_confusion_df$iculos,1,0)
+```
+
+# We are creating a new variable.
+
+If gcs abnormal is happening before discharge, we choose gcs abnormal offset, if discharge is happening before gcs abnormal, we choose discharge offset.
+
+```{r}
+adm_disorientation_risk_code_stat<-critical_illness_confusion_df%>%
+  mutate(offset_of_analysis = case_when( gcs_abnormality_offset <= iculos ~ gcs_abnormality_offset
+                                        ,gcs_abnormality_offset > iculos ~ iculos)
+  )
+```
+
+
+# Dataset report
+
+```{r}
+dfSummary.html<-view(dfSummary(
+adm_disorientation_risk_code_stat
+))
+
+system("wkhtmltopdf --javascript-delay 1 dfSummary.html dfSummary.pdf")
+```
+
+# Final variables wrangling
+
+Some variables were mapped using JMP statistical software following the rules below:
+
+*De-escalation of code status*
+Was defined by an order to change code status to one of the following : Do nNot resuscitateResusciatate (n=5983), No Cardioversion(n=225), No Cardiopulmonary Resuscitation N=576), No Cardioversion (n=225), No Intubation(n=468), No Vasopressors/inotropes (n=60), Comfort Measures Only (n=104), ….” "code_descalation"   = recoded “adm_code_status_change”
+
+Level   
+Advance directives 
+Comfort measures only 
+Do not resuscitate 
+No augmentation of care 
+No blood draws 
+No blood products 
+No cardioversion 
+No CPR 
+No intubation 
+No vasopressors/inotropes 
+Total 
+
+*time_to_event*
+
+“Time to event was from ICU admission until code status change or censoring”. This means that I used either time to code descalation or length of ICU stay as time to event. Here is the code for that variable.
+
+`If( :code descalation == 0, :Name( "ico los/hours" ), :adm_code_status_change_hrs)`
+
+*disorientation*  
+
+We defined disorientation as “confused”, having “inappropriate words” or “incomprehensible sounds”, but with a normal assessment of the GCS motor “obey commands” and eye opening “spontaneously” responses.
+Here is the code for that variable:
+
+`If(:gcs_motor_baseline == 6 & :gcs_eyes_baseline == 4 & 1 < :gcs_verbal_baseline <5,1,0)`
+
+
+
+
+
+
+
+
+

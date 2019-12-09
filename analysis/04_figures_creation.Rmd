@@ -1,0 +1,24 @@
+---
+title: "03_tables_creation"
+output: html_notebook
+---
+
+```{r setup, include=FALSE}
+#load the data
+#load("C:/BIG FILES/Phenotyping/HemodynamicProjectsDatasetFeb18.RData")
+```
+
+# Load libs
+```{r}
+library(dplyr)
+library(survminer)
+library(survival)
+```
+
+# Plot the baseline survival function
+
+```{r}
+ggsurvplot(survfit(coxph,data=main_df), palette = "#2E9FDF",
+           ggtheme = theme_minimal())
+```
+
